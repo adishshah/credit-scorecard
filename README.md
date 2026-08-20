@@ -1,79 +1,105 @@
 # Consumer Credit Scorecard
 
-A retail Probability-of-Default (PD) scorecard built on the Home Credit Default Risk
-dataset, following the traditional WOE / logistic-regression scorecard methodology
-used in retail credit risk teams.
+A retail Probability-of-Default (PD) scorecard built end-to-end on real,
+messy Kaggle data — WOE binning, logistic regression, scaled to an actual
+points-based scorecard, benchmarked against XGBoost, and validated with
+KS/Gini/PSI. Built the way a retail credit risk team actually builds one,
+prioritizing interpretability and auditability over black-box accuracy.
+
+**Dataset:** [Credit Card Approval Prediction](https://www.kaggle.com/datasets/rikdifos/credit-card-approval-prediction) (Kaggle) — two files with no ready-made
+target; the label had to be derived from monthly payment-status history.
+
+## Results
+
+| Metric | Train | Validation | Test |
+|---|---|---|---|
+| KS | 18.10 | 6.10 | 12.14 |
+| Gini | 0.2151 | 0.0183 | 0.1087 |
+
+- 438,557 raw applicants → 45,985 labeled (had credit history) → 9,997 after
+  deduplication → 5,998 / 1,999 / 2,000 train/val/test split
+- Final bad rate ~4.4%, 5-variable logistic scorecard, all coefficients
+  correctly signed and validated against VIF and business intuition
+- XGBoost challenger benchmarked head-to-head: outperforms on train but
+  **not** out-of-sample — evidence the performance ceiling is the data,
+  not the model choice, which is the actual justification for shipping
+  the interpretable model
+- Full write-up, including every limitation and assumption:
+  [`reports/model_memo_template.md`](reports/model_memo_template.md)
+
+## What this project demonstrates
+
+- **Target engineering from raw behavioral data** — no label existed in
+  the source data; built one from monthly payment-status codes
+- **A real bug found and fixed, not glossed over:** WOE application
+  (`woebin_ply`) silently produced NaN for 30% of rows on a category that
+  was correctly binned at fit time — traced to a fit/apply inconsistency
+  in how missing values are recognized, and fixed rather than patched
+  around by dropping data
+- **A genuine multicollinearity diagnosis:** a coefficient flipped sign
+  when two correlated variables were both included; diagnosed via VIF,
+  resolved by dropping the weaker-IV variable, not just forced to a
+  "correct" sign
+- **An IV-inflation finding, tested rather than assumed:** three variables
+  showed suspiciously high Information Value; rather than assuming
+  leakage, they were re-binned under the same tuned settings as the rest
+  of the model and shown to have no coherent trend — small-sample noise,
+  not signal, a materially different (and more defensible) conclusion
+  than the initial suspicion
+- Full validation suite (KS, Gini, lift, calibration) with honest
+  reporting of where the model is weak, not just where it's strong
 
 ## Project structure
 
 ```
 credit-scorecard/
-├── data/
-│   ├── raw/              # original downloaded CSVs go here (gitignored)
-│   └── processed/        # cleaned / WOE-transformed data (gitignored)
+├── data/                    # raw CSVs (gitignored) + processed data
 ├── src/
-│   ├── config.py         # paths, constants, scorecard scaling parameters
-│   ├── data_prep.py      # cleaning, target definition, train/test/val split
-│   ├── eda.py             # exploratory analysis helpers
-│   ├── woe_binning.py     # fine/coarse classing, IV, WOE transform
-│   ├── model.py           # logistic regression + VIF check + challenger XGBoost
-│   ├── scorecard.py       # scaling model to points (Offset/Factor/PDO)
-│   ├── validation.py      # KS, Gini, lift chart, calibration
-│   └── monitoring.py      # PSI / CSI stability checks
-├── app/
-│   └── streamlit_app.py  # scoring UI (Week 3)
-├── reports/
-│   └── model_memo_template.md   # fill in as you go — becomes your final write-up
-├── outputs/
-│   ├── models/            # saved model artifacts (.pkl)
-│   └── figures/           # saved plots for the memo / README
-├── requirements.txt
-└── .gitignore
+│   ├── config.py            # paths, constants, scorecard scaling params
+│   ├── eda.py                # exploratory analysis
+│   ├── data_prep.py          # target derivation, cleaning, split
+│   ├── woe_binning.py        # WOE/IV binning
+│   ├── model.py               # logistic regression, VIF, XGBoost challenger
+│   ├── scorecard.py           # scaling to points (Offset/Factor/PDO)
+│   ├── validation.py          # KS, Gini, lift, calibration
+│   ├── monitoring.py          # PSI stability check
+│   └── run_*.py                # end-to-end pipeline runners for each stage
+├── app/streamlit_app.py       # interactive scoring demo
+├── reports/model_memo_template.md   # full write-up
+└── requirements.txt            # pinned dependency versions
 ```
 
-## Setup
+## Running it
 
 ```bash
 python -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+venv\Scripts\activate              # Windows; use source venv/bin/activate on Mac/Linux
+python -m pip install -r requirements.txt
 ```
 
-## Data
+Download `application_record.csv` and `credit_record.csv` from the
+[Kaggle dataset page](https://www.kaggle.com/datasets/rikdifos/credit-card-approval-prediction)
+into `data/raw/`, then run the pipeline stages in order:
 
-Dataset: [Credit Card Approval Prediction](https://www.kaggle.com/datasets/rikdifos/credit-card-approval-prediction) (Kaggle, rikdifos).
-Download both `application_record.csv` and `credit_record.csv` and place them in `data/raw/`.
-Do not commit raw data — it's gitignored.
+```bash
+python -m src.run_binning         # target derivation, cleaning, WOE binning
+python -m src.run_model           # logistic regression, VIF, sign validation
+python -m src.run_scorecard       # scale to points
+python -m src.run_validation      # KS, Gini, lift, calibration
+python -m src.run_challenger      # XGBoost benchmark
+python -m src.run_monitoring      # PSI check
+streamlit run app/streamlit_app.py   # interactive scoring UI
+```
 
-This dataset has **no ready-made target column** — `application_record.csv` has
-applicant features, `credit_record.csv` has monthly credit behavior (`STATUS`
-per month). The target is derived in `data_prep.derive_target()`: an applicant
-is "bad" if a `STATUS` of 2/3/4/5 (60+ days overdue) appears anywhere in their
-history, "good" otherwise. This derivation — and the fact that it's a
-simplified stand-in for a full vintage analysis — is worth a paragraph in the
-model memo; it's a natural interview question.
+## Known limitations
 
-## Workflow (matches the Week 1-3 plan)
+- No true out-of-time split — this dataset has no usable time axis, so
+  train/val/test are stratified random splits rather than genuine
+  chronological cohorts. This is the single biggest methodological gap.
+- Small, imbalanced sample (~265 bad events in training) drives real
+  instability in validation metrics across splits.
+- PSI monitoring compares in-sample vs. out-of-sample distributions as a
+  proxy for drift, since no real longitudinal data exists.
+- Expected Loss / cutoff analysis not yet built.
 
-1. `src/eda.py` — understand the data before touching anything else
-2. `src/data_prep.py` — clean known anomalies, define target, split data
-3. `src/woe_binning.py` — fine → coarse classing, compute IV, shortlist variables
-4. `src/model.py` — VIF check, fit logistic regression, sanity-check coefficient signs
-5. `src/scorecard.py` — scale the model into actual points
-6. `src/validation.py` — KS, Gini, lift, calibration
-7. `src/monitoring.py` — simulate PSI drift
-8. `app/streamlit_app.py` — wrap it in a usable interface
-9. `reports/model_memo_template.md` — write it up
-
-## Status
-
-- [ ] EDA complete
-- [ ] Target defined, anomalies handled, split done
-- [ ] WOE binning + IV shortlist done
-- [ ] Logistic model fit, VIF clean, coefficient signs validated
-- [ ] Scorecard scaled to points
-- [ ] Validation suite run (KS / Gini / calibration)
-- [ ] Challenger XGBoost + SHAP comparison done
-- [ ] PSI monitoring simulated
-- [ ] Streamlit app working
-- [ ] Model memo written
+Full details, reasoning, and every assumption made: [`reports/model_memo_template.md`](reports/model_memo_template.md)
